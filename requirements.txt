@@ -1,0 +1,6 @@
+langchain>=0.2.7
+langchain-openai>=0.1.7
+langchain-community>=0.2.7
+faiss-cpu>=1.8.0
+openai>=1.30.0
+pytest>=8.2.0
