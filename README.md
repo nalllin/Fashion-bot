@@ -51,3 +51,13 @@ Type `exit` when you are done chatting.
 ```bash
 pytest
 ```
+
+## Implementation & Testing Notebook
+
+A step-by-step walkthrough lives at [`notebooks/AIChatStylist_demo.ipynb`](notebooks/AIChatStylist_demo.ipynb). It shows how to:
+
+- Configure local or Colab environments and swap between live OpenAI usage and the built-in offline demo mode.
+- Instantiate the `AIChatStylist`, optionally ingest outfit imagery, and inspect the stored FAISS context.
+- Trigger the full `pytest` suite directly from the notebook to validate the pipeline end-to-end.
+
+Open the notebook in Jupyter, VS Code, or Colab to explore the implementation interactively.
