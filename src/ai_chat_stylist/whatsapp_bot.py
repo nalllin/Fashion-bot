@@ -1,7 +1,8 @@
-"""Utilities for wiring the stylist into a WhatsApp/Whati bot."""
+"""WATI/WhatsApp webhook helpers for the AI stylist."""
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
@@ -12,8 +13,8 @@ from .chatbot import AIChatStylist
 
 
 @dataclass
-class WhatsAppIncomingMessage:
-    """Light-weight representation of a WhatsApp message payload."""
+class WatiIncomingMessage:
+    """Light-weight representation of a message delivered by WATI."""
 
     wa_id: str
     body: str
@@ -21,148 +22,194 @@ class WhatsAppIncomingMessage:
     message_type: str = "text"
 
 
-def extract_whatsapp_messages(payload: dict) -> list[WhatsAppIncomingMessage]:
-    """Parse WhatsApp/Whati webhook payload into normalized messages."""
+def _append_message(
+    collector: list[WatiIncomingMessage],
+    *,
+    wa_id: Optional[str],
+    body: Optional[str],
+    message_id: Optional[str],
+    message_type: str,
+) -> None:
+    if wa_id and body:
+        collector.append(
+            WatiIncomingMessage(
+                wa_id=wa_id,
+                body=body,
+                message_id=message_id or "",
+                message_type=message_type,
+            )
+        )
 
-    messages: list[WhatsAppIncomingMessage] = []
-    for entry in payload.get("entry", []):
-        for change in entry.get("changes", []):
+
+def extract_wati_messages(payload: dict) -> list[WatiIncomingMessage]:
+    """Parse a WATI webhook payload into normalized message objects."""
+
+    messages: list[WatiIncomingMessage] = []
+
+    # 1) Direct WATI webhook shape
+    for message in payload.get("messages", []) or []:
+        message_type = message.get("type", "text")
+        wa_id = message.get("from") or message.get("waId") or payload.get("waId")
+        message_id = message.get("id") or message.get("msgId")
+        body: Optional[str] = None
+        if message_type == "text":
+            body = (message.get("text") or {}).get("body") or message.get("text")
+        elif message_type == "interactive":
+            interactive = message.get("interactive", {})
+            if interactive.get("type") == "button_reply":
+                body = (interactive.get("button_reply") or {}).get("title")
+            elif interactive.get("type") == "list_reply":
+                body = (interactive.get("list_reply") or {}).get("title")
+        elif "message" in message:
+            body = (message["message"].get("text") or {}).get("body")
+        _append_message(
+            messages,
+            wa_id=wa_id,
+            body=body,
+            message_id=message_id,
+            message_type=message_type,
+        )
+
+    # 2) Meta-style entries (forwarded straight from WhatsApp Cloud)
+    for entry in payload.get("entry", []) or []:
+        for change in entry.get("changes", []) or []:
             value = change.get("value", {})
             for message in value.get("messages", []) or []:
-                wa_id = message.get("from")
-                message_id = message.get("id", "")
                 message_type = message.get("type", "text")
-                body = ""
+                wa_id = message.get("from")
+                message_id = message.get("id")
+                body: Optional[str] = None
                 if message_type == "text":
-                    body = message.get("text", {}).get("body", "")
+                    body = (message.get("text") or {}).get("body")
                 elif message_type == "interactive":
                     interactive = message.get("interactive", {})
                     if interactive.get("type") == "button_reply":
-                        body = interactive.get("button_reply", {}).get("title", "")
+                        body = (interactive.get("button_reply") or {}).get("title")
                     elif interactive.get("type") == "list_reply":
-                        body = interactive.get("list_reply", {}).get("title", "")
-                if wa_id and body:
-                    messages.append(
-                        WhatsAppIncomingMessage(
-                            wa_id=wa_id,
-                            body=body,
-                            message_id=message_id,
-                            message_type=message_type,
-                        )
-                    )
+                        body = (interactive.get("list_reply") or {}).get("title")
+                _append_message(
+                    messages,
+                    wa_id=wa_id,
+                    body=body,
+                    message_id=message_id,
+                    message_type=message_type,
+                )
+
+    # 3) Flat payload (single event)
+    if not messages:
+        wa_id = payload.get("waId") or payload.get("from")
+        text_value: Optional[str] = None
+        if isinstance(payload.get("text"), dict):
+            text_value = payload["text"].get("body")
+        elif isinstance(payload.get("text"), str):
+            text_value = payload["text"]
+        elif isinstance(payload.get("message"), dict):
+            inner = payload["message"]
+            if inner.get("type") == "text":
+                text_value = (inner.get("text") or {}).get("body")
+        if wa_id and text_value:
+            messages.append(
+                WatiIncomingMessage(
+                    wa_id=wa_id,
+                    body=text_value,
+                    message_id=payload.get("msgId", ""),
+                    message_type="text",
+                )
+            )
+
     return messages
 
 
-def build_quick_reply_menu() -> dict:
-    """Return an interactive message payload that mirrors the design mock."""
+def build_quick_reply_menu_payload() -> dict:
+    """Return a WATI interactive button payload that mirrors the mock."""
 
     return {
-        "messaging_product": "whatsapp",
-        "type": "interactive",
-        "interactive": {
-            "type": "button",
-            "body": {
-                "text": (
-                    "\ud83d\udc84 Your Fashion Assistant\n"
-                    "What would you like to do?\n"
-                    "Choose an option \ud83d\udc47"
-                )
-            },
-            "action": {
-                "buttons": [
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "upload-wardrobe",
-                            "title": "\ud83d\udce4 Upload Wardrobe",
-                        },
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "ask-fashion-advice",
-                            "title": "\ud83d\udcdc Ask Fashion Advice",
-                        },
-                    },
-                    {
-                        "type": "reply",
-                        "reply": {
-                            "id": "outfit-suggestion",
-                            "title": "\ud83d\udc5a Outfit Suggestion",
-                        },
-                    },
-                ]
-            },
+        "header": {"type": "text", "text": "\ud83d\udc84 Your Fashion Assistant"},
+        "body": {
+            "text": (
+                "What would you like to do?\n"
+                "Choose an option 👇"
+            )
         },
+        "footer": {"text": "powered by AIChatStylist"},
+        "buttons": [
+            {
+                "type": "reply",
+                "title": "📤 Upload Wardrobe",
+                "id": "upload-wardrobe",
+            },
+            {
+                "type": "reply",
+                "title": "📜 Ask Fashion Advice",
+                "id": "ask-fashion-advice",
+            },
+            {
+                "type": "reply",
+                "title": "👚 Outfit Suggestion",
+                "id": "outfit-suggestion",
+            },
+        ],
     }
 
 
-class WhatsAppTransport:
-    """Minimal transport for sending WhatsApp Cloud API messages."""
+class WatiTransport:
+    """Minimal transport for the WATI API."""
 
     def __init__(
         self,
         *,
-        phone_number_id: str,
-        access_token: str,
-        api_version: str = "v20.0",
+        base_url: str,
+        api_key: str,
         session: Optional[requests.Session] = None,
     ) -> None:
-        self.phone_number_id = phone_number_id
-        self.access_token = access_token
-        self.api_version = api_version
+        if not base_url:
+            raise RuntimeError("WATI base URL is required")
+        if not api_key:
+            raise RuntimeError("WATI API key is required")
+        self.base_url = base_url.rstrip("/")
+        self.api_key = api_key
         self._session = session or requests.Session()
 
     @classmethod
-    def from_env(cls) -> "WhatsAppTransport":
-        """Create a transport using standard WhatsApp Cloud env vars."""
-
-        phone_number_id = os.environ.get("WHATSAPP_PHONE_NUMBER_ID")
-        access_token = os.environ.get("WHATSAPP_ACCESS_TOKEN")
-        if not phone_number_id or not access_token:
+    def from_env(cls) -> "WatiTransport":
+        base_url = os.environ.get("WATI_SERVER_URL")
+        api_key = os.environ.get("WATI_API_KEY")
+        if not base_url or not api_key:
             raise RuntimeError(
-                "WHATSAPP_PHONE_NUMBER_ID and WHATSAPP_ACCESS_TOKEN must be set."
+                "WATI_SERVER_URL and WATI_API_KEY environment variables must be set."
             )
-        return cls(phone_number_id=phone_number_id, access_token=access_token)
+        return cls(base_url=base_url, api_key=api_key)
 
-    def _post(self, payload: dict) -> dict:
-        url = (
-            f"https://graph.facebook.com/"
-            f"{self.api_version}/{self.phone_number_id}/messages"
-        )
+    def _post(self, path: str, payload: dict) -> dict:
+        url = f"{self.base_url}/{path.lstrip('/')}"
         headers = {
-            "Authorization": f"Bearer {self.access_token}",
+            "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
         response = self._session.post(url, headers=headers, json=payload, timeout=10)
         response.raise_for_status()
-        return response.json()
+        try:
+            return response.json()
+        except json.JSONDecodeError:
+            return {"status": response.status_code}
 
     def send_text(self, to: str, body: str) -> dict:
-        payload = {
-            "messaging_product": "whatsapp",
-            "recipient_type": "individual",
-            "to": to,
-            "type": "text",
-            "text": {"body": body, "preview_url": False},
-        }
-        return self._post(payload)
+        payload = {"messageText": body}
+        return self._post(f"api/v1/sendSessionMessage/{to}", payload)
 
     def send_quick_reply_menu(self, to: str) -> dict:
-        payload = build_quick_reply_menu()
-        payload["to"] = to
-        payload["recipient_type"] = "individual"
-        return self._post(payload)
+        payload = build_quick_reply_menu_payload()
+        return self._post(f"api/v1/sendInteractiveButtons/{to}", payload)
 
 
-class WhatsAppStylistBot:
-    """Routes WhatsApp webhook events to the AI stylist and sends replies."""
+class WatiStylistBot:
+    """Routes WATI webhook events to the AI stylist and sends replies."""
 
     def __init__(
         self,
         *,
         stylist: Optional[AIChatStylist] = None,
-        transport: Optional[WhatsAppTransport] = None,
+        transport: Optional[WatiTransport] = None,
         menu_triggers: Optional[Iterable[str]] = None,
     ) -> None:
         self.stylist = stylist or AIChatStylist()
@@ -171,12 +218,10 @@ class WhatsAppStylistBot:
         self.menu_triggers = {trigger.lower() for trigger in triggers}
 
     def handle_payload(self, payload: dict) -> list[dict]:
-        """Process an incoming webhook payload and send responses."""
-
         if self.transport is None:
-            raise RuntimeError("WhatsApp transport is not configured.")
+            raise RuntimeError("WATI transport is not configured.")
         responses: list[dict] = []
-        for message in extract_whatsapp_messages(payload):
+        for message in extract_wati_messages(payload):
             normalized = message.body.strip().lower()
             if normalized in self.menu_triggers:
                 responses.append(self.transport.send_quick_reply_menu(message.wa_id))
@@ -186,8 +231,8 @@ class WhatsAppStylistBot:
         return responses
 
 
-def build_whatsapp_webhook_response(payload: dict) -> List[dict]:
-    """Convenience wrapper using env configured transport and stylist."""
+def build_whati_webhook_response(payload: dict) -> List[dict]:
+    """Convenience wrapper that wires env-configured WATI transport."""
 
-    bot = WhatsAppStylistBot(transport=WhatsAppTransport.from_env())
+    bot = WatiStylistBot(transport=WatiTransport.from_env())
     return bot.handle_payload(payload)

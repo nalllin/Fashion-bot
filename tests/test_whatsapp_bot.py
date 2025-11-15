@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from ai_chat_stylist.whatsapp_bot import (
-    WhatsAppStylistBot,
-    build_quick_reply_menu,
-    extract_whatsapp_messages,
+    WatiStylistBot,
+    build_quick_reply_menu_payload,
+    extract_wati_messages,
 )
 
 
@@ -20,37 +20,24 @@ def sample_payload(message_type: str, body: str) -> dict:
             "type": "button_reply",
             "button_reply": {"title": body},
         }
-    return {
-        "entry": [
-            {
-                "changes": [
-                    {
-                        "value": {
-                            "messages": [message],
-                        }
-                    }
-                ]
-            }
-        ]
-    }
+    return {"messages": [message]}
 
 
-def test_extract_whatsapp_messages_supports_text_and_buttons():
+def test_extract_wati_messages_supports_text_and_buttons():
     text_payload = sample_payload("text", "Ask Fashion Advice")
     interactive_payload = sample_payload("interactive", "Outfit Suggestion")
 
-    text_messages = extract_whatsapp_messages(text_payload)
-    button_messages = extract_whatsapp_messages(interactive_payload)
+    text_messages = extract_wati_messages(text_payload)
+    button_messages = extract_wati_messages(interactive_payload)
 
     assert text_messages[0].body == "Ask Fashion Advice"
     assert button_messages[0].body == "Outfit Suggestion"
 
 
 def test_quick_reply_menu_matches_expected_structure():
-    menu = build_quick_reply_menu()
-    buttons = menu["interactive"]["action"]["buttons"]
-    assert len(buttons) == 3
-    assert buttons[0]["reply"]["title"].startswith("\ud83d\udce4")
+    menu = build_quick_reply_menu_payload()
+    assert menu["header"]["text"].startswith("\ud83d\udc84")
+    assert len(menu["buttons"]) == 3
 
 
 class DummyStylist:
@@ -78,7 +65,7 @@ class DummyTransport:
 def test_bot_routes_messages_and_handles_menu_trigger():
     stylist = DummyStylist()
     transport = DummyTransport()
-    bot = WhatsAppStylistBot(stylist=stylist, transport=transport)
+    bot = WatiStylistBot(stylist=stylist, transport=transport)
 
     hi_payload = sample_payload("text", "Hi")
     question_payload = sample_payload("text", "What goes with chinos?")
