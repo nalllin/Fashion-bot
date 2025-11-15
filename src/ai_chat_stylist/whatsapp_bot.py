@@ -220,15 +220,41 @@ class WatiStylistBot:
     def handle_payload(self, payload: dict) -> list[dict]:
         if self.transport is None:
             raise RuntimeError("WATI transport is not configured.")
+
+        print("📩 RAW WATI PAYLOAD:", payload)
+
         responses: list[dict] = []
-        for message in extract_wati_messages(payload):
+        messages = extract_wati_messages(payload)
+
+        print("🧩 Parsed messages:", messages)
+
+        for message in messages:
+            print("📥 Incoming message.body:", repr(message.body))
+
+            if not message.body:
+                print("❌ message.body is EMPTY — cannot reply")
+                continue
+
             normalized = message.body.strip().lower()
             if normalized in self.menu_triggers:
+                print("🔘 Sending QUICK-REPLY menu")
                 responses.append(self.transport.send_quick_reply_menu(message.wa_id))
                 continue
+
             reply = self.stylist.chat(message.body)
-            responses.append(self.transport.send_text(message.wa_id, reply))
+            print("📤 LLM reply:", repr(reply))
+
+            if not reply.strip():
+                print("❌ LLM returned EMPTY reply")
+                continue
+
+            send_resp = self.transport.send_text(message.wa_id, reply)
+            print("📨 WATI send response:", send_resp)
+
+            responses.append(send_resp)
+
         return responses
+
 
 
 def build_whati_webhook_response(payload: dict) -> List[dict]:
