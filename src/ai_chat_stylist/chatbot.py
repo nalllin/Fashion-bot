@@ -110,10 +110,15 @@ class AIChatStylist:
         return description
 
     def _build_context(self, message: str) -> str:
-        docs = self.retriever.get_relevant_documents(message)
+        try:
+            docs = self.retriever.get_relevant_documents(message)
+        except AttributeError:
+            docs = self.retriever.invoke(message)
+
         if not docs:
             return "No stored wardrobe information yet."
         return "\n".join(doc.page_content for doc in docs)
+
 
     def chat(self, message: str) -> str:
         """Run a chat turn with the stylist using conversation memory."""
