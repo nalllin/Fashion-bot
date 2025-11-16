@@ -43,7 +43,6 @@ def _append_message(
 
 def extract_wati_messages(payload: dict) -> list[WatiIncomingMessage]:
     """Parse a WATI webhook payload into normalized message objects."""
-
     messages: list[WatiIncomingMessage] = []
 
     # 1) Direct WATI webhook shape
@@ -122,7 +121,6 @@ def extract_wati_messages(payload: dict) -> list[WatiIncomingMessage]:
 
 def build_quick_reply_menu_payload() -> dict:
     """Return a WATI interactive button payload that mirrors the mock."""
-
     return {
         "header": {"type": "text", "text": "\ud83d\udc84 Your Fashion Assistant"},
         "body": {
@@ -256,9 +254,7 @@ class WatiStylistBot:
         return responses
 
 
-
 def build_whati_webhook_response(payload: dict) -> List[dict]:
     """Convenience wrapper that wires env-configured WATI transport."""
-
     bot = WatiStylistBot(transport=WatiTransport.from_env())
     return bot.handle_payload(payload)

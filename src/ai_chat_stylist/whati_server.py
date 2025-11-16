@@ -56,7 +56,6 @@ class WatiWebhookHandler(BaseHTTPRequestHandler):
 
 def run(host: str | None = None, port: int | None = None) -> Tuple[str, int]:
     """Start a blocking HTTP server that processes WATI events."""
-
     host = host or os.environ.get("HOST", "0.0.0.0")
     port = port or int(os.environ.get("PORT", "8080"))
     server = HTTPServer((host, port), WatiWebhookHandler)
