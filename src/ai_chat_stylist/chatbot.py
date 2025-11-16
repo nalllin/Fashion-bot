@@ -146,44 +146,40 @@ class AIChatStylist:
 
     def generate_image(self, prompt: str, size: str = "512x512") -> str:
         """
-        Generate an image from a textual prompt using OpenAI's image API.
+        Generate an image from a textual prompt using OpenAI's image API (v1 style).
 
         Returns a URL of the generated image. Requires an OPENAI_API_KEY environment variable.
         """
-        # Read API key
         api_key = os.environ.get("OPENAI_API_KEY")
         if not api_key:
             raise RuntimeError(
                 "OPENAI_API_KEY environment variable must be set to use image generation."
             )
-        # Import openai lazily
-        import openai  # type: ignore
-        openai.api_key = api_key
 
-        # Try the newer 'images.generate' if available; otherwise fallback to 'Image.create'
-        try:
-            # This might work for newer versions of the SDK
-            response = openai.images.generate(
-                prompt=prompt,
-                n=1,
-                size=size,
-            )
-            data = response.get("data") or []
-            if data:
-                return data[0].get("url") or ""
-        except Exception:
-            pass
+        # Use the new OpenAI client from openai>=1.x
+        from openai import OpenAI  # type: ignore
 
-        # Fallback to DALL·E 2 endpoint
-        response = openai.Image.create(
+        # Passing api_key explicitly is optional if it's already in env, but explicit is clearer
+        client = OpenAI(api_key=api_key)
+
+        # Model name for image generation in the new API
+        response = client.images.generate(
+            model="gpt-image-1",
             prompt=prompt,
             n=1,
-            size=size,
+            size=size,  # e.g. "512x512", "1024x1024"
         )
-        data = response.get("data") or []
-        if data:
-            return data[0].get("url") or ""
-        raise RuntimeError("Image generation returned no data")
+
+        # New client returns an object with a .data list, items have .url
+        if response.data and len(response.data) > 0:
+            img = response.data[0]
+            # Some SDK versions use .url, others .b64_json; we prefer URL here.
+            url = getattr(img, "url", None)
+            if url:
+                return url
+
+        raise RuntimeError("Image generation returned no URL from OpenAI")
+
 
     def export_context(self) -> Iterable[str]:
         """Return stored vector texts for inspection or persistence."""
