@@ -18,7 +18,6 @@ def _load_image_bytes(image_path: str | Path) -> bytes:
 
 def describe_outfit_image(image_path: str | Path, prompt: Optional[str] = None) -> str:
     """Generate a textual summary for an outfit image using GPT-4o vision."""
-
     prompt = prompt or (
         "Provide a concise yet vivid description of this outfit, capturing key "
         "clothing items, their colors, fabric textures, and the overall vibe."
