@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Callable, Iterable, List, Optional
+import os
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -92,14 +93,12 @@ class AIChatStylist:
 
     def ingest_text(self, text: str) -> None:
         """Persist additional context into the vector store."""
-
         if not text:
             return
         self.vectorstore.add_texts([text])
 
     def add_outfit_image(self, image_path: str, prompt: Optional[str] = None) -> str:
         """Convert an outfit image into textual context and persist it."""
-
         description = describe_outfit_image(
             image_path,
             prompt
@@ -110,14 +109,17 @@ class AIChatStylist:
         return description
 
     def _build_context(self, message: str) -> str:
-        docs = self.retriever.get_relevant_documents(message)
+        try:
+            docs = self.retriever.get_relevant_documents(message)
+        except AttributeError:
+            docs = self.retriever.invoke(message)
+
         if not docs:
             return "No stored wardrobe information yet."
         return "\n".join(doc.page_content for doc in docs)
 
     def chat(self, message: str) -> str:
         """Run a chat turn with the stylist using conversation memory."""
-
         if not message.strip():
             raise ValueError("Message must be a non-empty string.")
 
@@ -142,7 +144,47 @@ class AIChatStylist:
         self.vectorstore.add_texts([f"User: {message}", f"Stylist: {reply}"])
         return reply
 
+    def generate_image(self, prompt: str, size: str = "512x512") -> str:
+        """
+        Generate an image from a textual prompt using OpenAI's image API.
+
+        Returns a URL of the generated image. Requires an OPENAI_API_KEY environment variable.
+        """
+        # Read API key
+        api_key = os.environ.get("OPENAI_API_KEY")
+        if not api_key:
+            raise RuntimeError(
+                "OPENAI_API_KEY environment variable must be set to use image generation."
+            )
+        # Import openai lazily
+        import openai  # type: ignore
+        openai.api_key = api_key
+
+        # Try the newer 'images.generate' if available; otherwise fallback to 'Image.create'
+        try:
+            # This might work for newer versions of the SDK
+            response = openai.images.generate(
+                prompt=prompt,
+                n=1,
+                size=size,
+            )
+            data = response.get("data") or []
+            if data:
+                return data[0].get("url") or ""
+        except Exception:
+            pass
+
+        # Fallback to DALL·E 2 endpoint
+        response = openai.Image.create(
+            prompt=prompt,
+            n=1,
+            size=size,
+        )
+        data = response.get("data") or []
+        if data:
+            return data[0].get("url") or ""
+        raise RuntimeError("Image generation returned no data")
+
     def export_context(self) -> Iterable[str]:
         """Return stored vector texts for inspection or persistence."""
-
         return getattr(self.vectorstore, "texts", [])

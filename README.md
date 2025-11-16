@@ -27,26 +27,32 @@ python -m ai_chat_stylist.app --image path/to/outfit.jpg
 ```
 Type `exit` when you are done chatting.
 
-### WhatsApp / Whati integration
-1. Configure WhatsApp Cloud credentials (used by WhatI bots):
+### WhatsApp / WATI (Whati) integration
+1. Configure the WATI credentials (replace the examples with your real tenant
+   values – the user-provided instance looks like `https://live-mt-server.wati.io/1048684`):
    ```bash
-   export WHATSAPP_PHONE_NUMBER_ID="<phone-number-id>"
-   export WHATSAPP_ACCESS_TOKEN="<permanent-token>"
+   export WATI_SERVER_URL="https://live-mt-server.wati.io/1048684"
+   export WATI_API_KEY="<paste the Bearer token you received>"
    ```
-2. In your WhatI bot webhook handler, import and forward payloads to the stylist:
-   ```python
-   from ai_chat_stylist.whatsapp_bot import build_whatsapp_webhook_response
-
-   def handle_whati_event(payload: dict) -> None:
-       # Sends quick reply menus for greetings and stylist responses for other input.
-       build_whatsapp_webhook_response(payload)
+   The helper automatically signs every request to the WATI REST API using these
+   values. Never commit the token to source control – inject it through env vars
+   wherever the webhook server runs.
+2. Start the bundled webhook server (it uses Python's `http.server` so there are
+   zero extra dependencies):
+   ```bash
+   python -m ai_chat_stylist.whati_server
    ```
-3. To send the green quick-reply card shown in the mock, call
-   `WhatsAppTransport.send_quick_reply_menu()` when the user sends "menu".
-
-The helper automatically streams incoming WhatsApp/Whati text and button
-messages into the `AIChatStylist` and posts the LLM responses back to WhatsApp so
-the conversation continues inside the chat UI.
+   The server binds to `0.0.0.0:8080` by default. Override with `HOST`/`PORT`
+   environment variables if you need a different interface.
+3. Point the WATI/Whati webhook URL at the server you just launched. Every
+   incoming payload gets routed through `WatiStylistBot`, which handles menu
+   triggers and forwards other messages to `AIChatStylist`.
+4. The quick-reply UI from the mock is implemented with WATI interactive
+   buttons. Anytime the user types `hi`, `hello`, `menu`, `start`, or `help`,
+   the bot calls the WATI "send interactive buttons" endpoint so that the three
+   shortcut buttons show up inside WhatsApp. All other inputs produce LLM
+   replies that the transport sends back via `sendSessionMessage`, keeping the
+   conversation inside WhatsApp.
 
 ## Tests
 ```bash
