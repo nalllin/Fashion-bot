@@ -144,7 +144,7 @@ class AIChatStylist:
         self.vectorstore.add_texts([f"User: {message}", f"Stylist: {reply}"])
         return reply
 
-    def generate_image(self, prompt: str, size: str = "512x512") -> str:
+    def generate_image(self, prompt: str, size: str = "1024x1024") -> str:
         """
         Generate an image from a textual prompt using OpenAI's image API (v1 style).
 
@@ -156,29 +156,30 @@ class AIChatStylist:
                 "OPENAI_API_KEY environment variable must be set to use image generation."
             )
 
-        # Use the new OpenAI client from openai>=1.x
         from openai import OpenAI  # type: ignore
 
-        # Passing api_key explicitly is optional if it's already in env, but explicit is clearer
         client = OpenAI(api_key=api_key)
 
-        # Model name for image generation in the new API
+        # Ensure size is one of the supported values
+        allowed_sizes = {"1024x1024", "1024x1536", "1536x1024", "auto"}
+        if size not in allowed_sizes:
+            size = "1024x1024"
+
         response = client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
             n=1,
-            size=size,  # e.g. "512x512", "1024x1024"
+            size=size,
         )
 
-        # New client returns an object with a .data list, items have .url
         if response.data and len(response.data) > 0:
             img = response.data[0]
-            # Some SDK versions use .url, others .b64_json; we prefer URL here.
             url = getattr(img, "url", None)
             if url:
                 return url
 
         raise RuntimeError("Image generation returned no URL from OpenAI")
+
 
 
     def export_context(self) -> Iterable[str]:
