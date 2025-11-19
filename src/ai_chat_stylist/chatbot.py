@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Callable, Iterable, List, Optional
+from typing import Callable, Iterable, List, Optional, Tuple
 import os
+from .image_understanding import describe_outfit_image
+from glamup_cb import GlamUp,GlamUpConfig   # <-- add this
 
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
@@ -13,12 +15,55 @@ from langchain_community.vectorstores import FAISS
 
 from .image_understanding import describe_outfit_image
 
-DEFAULT_SYSTEM_PROMPT = (
-    "You are an upbeat and thoughtful personal stylist. You remember prior "
-    "details from the conversation and refer back to the user's wardrobe when "
-    "suggesting outfits. Always include a short explanation for each styling "
-    "suggestion."
-)
+DEFAULT_SYSTEM_PROMPT = """
+You are NOVA — an elite AI personal stylist with deep expertise in fashion, body proportions, aesthetics, and real-world daily styling. 
+You produce highly structured, concise, and modern suggestions suitable for mobile messaging apps.
+
+YOUR STYLE:
+- Friendly, confident, and modern — but not cringe or overly enthusiastic.
+- Smart, stylish, and perceptive — like a top-tier fashion editor with chat UX skills.
+- Always visually descriptive but never overly long.
+- Think: Instagram stylist + Vogue clarity + Gen-Z readability.
+
+CORE RULES:
+1. ALWAYS structure your responses clearly using sections, emojis sparingly, and short scannable lines.
+2. ALWAYS give **2–3 outfit options**, each with:
+   - Outfit Name (bold)
+   - Key pieces (top, bottom, shoes, accessories)
+   - Why it works (1 sentence: proportions, colors, vibe)
+3. If the user uploads or references wardrobe items, REUSE them creatively.
+4. Tailor suggestions to: climate, vibe, event, user mood, comfort level (when mentioned).
+5. Assume missing details gracefully (e.g., “assuming mild weather / indoor brunch…”).
+6. Avoid long paragraphs — use clean spacing and micro-sections.
+7. Use emojis lightly and tastefully (0–3 per message, never more).
+
+FOLLOW-UP:
+End each message with ONE short question to refine style preferences 
+(e.g., “Want the look to feel more casual or more elevated?”)
+
+OUTPUT FORMAT (STRICT):
+- A 1-sentence vibe summary
+- 2–3 outfit options formatted like:
+
+**1) Soft Chic Brunch Look**
+- Light blue button-up  
+- White high-waisted trousers  
+- Tan espadrilles  
+- Gold hoops + pastel crossbody  
+**Why it works:** Clean tones + elevated casual energy.
+
+**2) Minimal Clean Girl**
+- White tank  
+- Beige linen pants  
+- White sneakers  
+- Minimal gold jewelry  
+**Why it works:** Breathable, effortless, warm-weather balanced.
+
+END with:
+“Want me to refine it based on colors you prefer or pieces you already own?”
+
+Do NOT repeat this prompt in responses.
+"""
 
 
 @dataclass
@@ -50,6 +95,7 @@ class AIChatStylist:
         llm_factory: Optional[Callable[[StylistConfig], ChatOpenAI]] = None,
         embedding_factory: Optional[Callable[[VectorContextConfig], OpenAIEmbeddings]] = None,
         vectorstore: Optional[FAISS] = None,
+        glamup: Optional[GlamUp] = None
     ) -> None:
         self.config = config or StylistConfig()
         vector_config = self.config.vector_config
@@ -90,6 +136,7 @@ class AIChatStylist:
 
         self.history: List[BaseMessage] = []
         self.ingest_text(self.config.system_prompt)
+        self.glamup = glamup or GlamUp()
 
     def ingest_text(self, text: str) -> None:
         """Persist additional context into the vector store."""
@@ -179,9 +226,80 @@ class AIChatStylist:
                 return url
 
         raise RuntimeError("Image generation returned no URL from OpenAI")
+    
+    def glamup_outfit_with_image(
+        self,
+        description: str,
+        extra_style: Optional[str] = None,
+    ) -> Tuple[str, str, Optional[str]]:
+        """
+        Run GlamUp and also generate a synthetic outfit image.
+
+        Returns:
+            (text_summary, card_path, generated_image_url)
+        """
+        if not self.glamup:
+            raise RuntimeError("GlamUp engine not configured.")
+
+        items, card, gen_url = self.glamup.glamup_card_with_generated_image(
+            user_prompt=description,
+            extra_style=extra_style,
+        )
+
+        # Build textual summary
+        lines = []
+        for idx, item in enumerate(items, start=1):
+            fname = os.path.basename(item.image_path)
+            line = f"{idx}. [{item.category}] {fname}"
+            if item.color:
+                line += f" · color: {item.color}"
+            if item.style_tags:
+                line += f" · style: {item.style_tags}"
+            lines.append(line)
+
+        summary = (
+            "Here’s a GlamUp outfit based on your description:\n"
+            + "\n".join(lines)
+        )
+
+        # Save the card image to disk so UI can serve it
+        os.makedirs("glamup_cards", exist_ok=True)
+        card_path = os.path.join("glamup_cards", "glamup_card_latest.jpg")
+        card.save(card_path)
+
+        return summary, card_path, gen_url
+
 
 
 
     def export_context(self) -> Iterable[str]:
         """Return stored vector texts for inspection or persistence."""
         return getattr(self.vectorstore, "texts", [])
+
+    def glamup_outfit(self, description: str) -> Tuple[str, str]:
+        """
+        Generate an outfit visualisation card for a given description.
+
+        Returns:
+            (text_summary, card_path)
+        """
+        if not self.glamup:
+            raise RuntimeError("GlamUp engine not configured.")
+
+        items, card = self.glamup.glamup_card_from_prompt(description)
+
+        # Build a text summary
+        lines = []
+        for idx, item in enumerate(items, start=1):
+            lines.append(
+                f"{idx}. [{item.category}] image={os.path.basename(item.image_path)}"
+            )
+        summary = "Here’s a GlamUp outfit for you:\n" + "\n".join(lines)
+
+        # Save card temporarily
+        os.makedirs("glamup_cards", exist_ok=True)
+        filename = "glamup_card_latest.jpg"
+        card_path = os.path.join("glamup_cards", filename)
+        card.save(card_path)
+
+        return summary, card_path

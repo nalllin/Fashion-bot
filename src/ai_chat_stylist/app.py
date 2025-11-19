@@ -43,6 +43,7 @@ def main(argv: list[str] | None = None) -> int:
 
     stylist = AIChatStylist(config=config)
 
+    # Preload outfit images into context
     for image_path in args.image:
         try:
             description = stylist.add_outfit_image(str(image_path))
@@ -50,21 +51,59 @@ def main(argv: list[str] | None = None) -> int:
         except FileNotFoundError as exc:
             print(f"Warning: {exc}")
 
+    print("------------------------------------------------------------")
+    print(" Alle – Fashion AI Stylist (CLI Demo)")
+    print("------------------------------------------------------------")
+    print("Type your message normally to chat.")
+    print("Type 'glamup: <your description>' to generate an outfit + SDXL image.")
     print("Type 'exit' or 'quit' to end the session.\n")
+
     while True:
         try:
             user_input = input("You: ").strip()
         except EOFError:
             print()
             break
+
         if user_input.lower() in {"exit", "quit"}:
             break
+
+        if not user_input:
+            continue
+
+        # ------------------------------------------
+        # ✨ GLAMUP MODE
+        # ------------------------------------------
+        if user_input.lower().startswith("glamup:"):
+            prompt = user_input.split(":", 1)[1].strip()
+
+            print("\n✨ Generating GlamUp outfit, please wait...\n")
+            try:
+                summary, card_path, gen_url = stylist.glamup_outfit_with_image(prompt)
+
+                print("------------------------------------------------------------")
+                print("✨ GLAMUP RESULT")
+                print("------------------------------------------------------------")
+                print(summary)
+                print(f"\n📌 Outfit card saved at: {card_path}")
+                print(f"🖼️ SDXL image URL: {gen_url}")
+                print("------------------------------------------------------------\n")
+
+            except Exception as exc:
+                print(f"Error running GlamUp: {exc}\n")
+
+            continue
+
+        # ------------------------------------------
+        # 🤖 NORMAL CHAT
+        # ------------------------------------------
         try:
             response = stylist.chat(user_input)
         except ValueError as exc:
             print(f"Error: {exc}")
             continue
-        print(f"Stylist: {response}\n")
+
+        print(f"Alle: {response}\n")
 
     return 0
 
