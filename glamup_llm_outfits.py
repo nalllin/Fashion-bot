@@ -1,292 +1,283 @@
-"""GlamUp LLM outfits UI with questionnaire and outfit card preview."""
+"""Outfit generation utilities for GlamUp LLM workflows.
+
+This module bundles the Stable Diffusion XL inpainting + IP-Adapter pipeline,
+collage-driven product retrieval, and card assembly helpers. It exposes a CLI
+compatible entrypoint mirroring the old `outfit_generator.py` script while
+keeping the generator logic centralized.
+"""
 from __future__ import annotations
 
-import os
+import argparse
+import logging
 import tempfile
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import List, Optional, Sequence, Tuple
 
-from flask import Flask, jsonify, render_template_string, request
+import torch
+from diffusers import AutoPipelineForInpainting, AutoencoderKL
+from PIL import Image, ImageDraw, ImageOps
 
-from chatbot import AIChatStylist
+try:  # Optional, used for automatic mask generation
+    from rembg import remove as rembg_remove
+except Exception:  # pragma: no cover - optional dependency
+    rembg_remove = None
 
-app = Flask(__name__)
-stylist = AIChatStylist()
-
-QUESTIONNAIRE: Dict[str, List[str]] = {
-    "Style Identity Questions": [
-        "How would you describe your personal style in 3 words? (e.g., casual, edgy, classic)",
-        "If your wardrobe had a \"mood,\" what would it be? (playful, minimal, bold, clean, boho, etc.)",
-    ],
-    "Clothing Preferences": [
-        "What kind of outfits make you feel most confident?",
-        "Do you prefer more: timeless basics or trendy statement pieces?",
-        "Do you like fitted silhouettes, relaxed fits, or a mix?",
-        "What's your go-to outfit for: A workout / A casual outing / A night out",
-    ],
-    "Color & Print Choices": [
-        "Which colors do you gravitate most toward?",
-        "Any colors you avoid completely?",
-        "Do you prefer solid colors, minimal prints, bold prints?",
-    ],
-    "Shopping Behavior": [
-        "When shopping, what do you prioritize first: comfort, trendiness, budget, or brand?",
-        "Do you shop because you need something specific or for everyday wear?",
-        "How often do you refresh your wardrobe? (monthly, seasonally, rarely)",
-    ],
-}
+LOGGER = logging.getLogger(__name__)
 
 
-def build_questionnaire_html() -> str:
-    sections = []
-    for title, questions in QUESTIONNAIRE.items():
-        items = "".join(f"<li>{q}</li>" for q in questions)
-        sections.append(f"<div class='q-section'><h4>{title}</h4><ul>{items}</ul></div>")
-    return "".join(sections)
+def parse_crop_boxes(raw_boxes: Optional[Sequence[str]]) -> List[Tuple[int, int, int, int]]:
+    """Parse a list of crop box strings formatted as "x1,y1,x2,y2"."""
+    boxes: List[Tuple[int, int, int, int]] = []
+    for raw in raw_boxes or []:
+        parts = raw.split(",")
+        if len(parts) != 4:
+            raise ValueError(f"Invalid crop box '{raw}'. Expected format x1,y1,x2,y2")
+        try:
+            box = tuple(int(p) for p in parts)  # type: ignore[assignment]
+        except ValueError as exc:  # pragma: no cover - invalid input path
+            raise ValueError(f"Crop box values must be integers: {raw}") from exc
+        boxes.append(box)
+    return boxes
 
 
-@app.route("/", methods=["GET"])
-def index() -> str:
-    questionnaire_html = build_questionnaire_html()
-    html_template = f"""
-    <!DOCTYPE html>
-    <html lang='en'>
-    <head>
-        <meta charset='UTF-8' />
-        <meta name='viewport' content='width=device-width, initial-scale=1.0' />
-        <title>GlamUp Stylist Console</title>
-        <style>
-            :root {{
-                --bg: #0f1117;
-                --panel: #161a23;
-                --accent: #ff8fb1;
-                --text: #f7f7f7;
-                --muted: #a5a7b0;
-                --border: #2b3040;
-            }}
-            * {{ box-sizing: border-box; }}
-            body {{
-                margin: 0;
-                font-family: 'Inter', Arial, sans-serif;
-                background: linear-gradient(135deg, #0f1117, #1a2030);
-                color: var(--text);
-                min-height: 100vh;
-            }}
-            header {{
-                padding: 20px 28px;
-                display: flex;
-                align-items: baseline;
-                justify-content: space-between;
-            }}
-            header h1 {{ margin: 0; font-size: 28px; letter-spacing: 0.5px; }}
-            header span {{ color: var(--muted); font-size: 14px; }}
-            main {{ display: grid; grid-template-columns: 2fr 1.5fr; gap: 18px; padding: 0 24px 24px; }}
-            .panel {{ background: var(--panel); border: 1px solid var(--border); border-radius: 16px; padding: 18px; box-shadow: 0 16px 50px rgba(0,0,0,0.35); }}
-            .panel h3 {{ margin-top: 0; letter-spacing: 0.3px; }}
-            .chat-window {{ display: flex; flex-direction: column; gap: 12px; height: 70vh; }}
-            #messages {{ flex: 1; overflow-y: auto; padding: 12px; border: 1px solid var(--border); border-radius: 12px; background: #0f1117; }}
-            .message {{ margin-bottom: 10px; }}
-            .message span {{ display: block; font-size: 13px; color: var(--muted); }}
-            .bubble {{ display: inline-block; padding: 10px 12px; border-radius: 12px; margin-top: 4px; max-width: 90%; line-height: 1.4; }}
-            .you {{ background: #1f2433; color: var(--text); }}
-            .bot {{ background: rgba(255, 143, 177, 0.08); color: #ffd6e6; border: 1px solid rgba(255, 143, 177, 0.3); }}
-            .inputs {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; }}
-            .inputs label {{ font-size: 12px; color: var(--muted); margin-bottom: 4px; display: block; }}
-            input[type='text'], input[type='file'] {{ width: 100%; padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: #0f1117; color: var(--text); }}
-            button {{ padding: 10px 12px; border-radius: 10px; border: none; background: linear-gradient(120deg, #ff8fb1, #ff6c9f); color: #0f1117; font-weight: 700; cursor: pointer; box-shadow: 0 8px 20px rgba(255,108,159,0.35); }}
-            button:hover {{ filter: brightness(1.05); }}
-            .card {{ display: grid; grid-template-columns: 180px 1fr; gap: 16px; align-items: start; }}
-            .card .preview {{ position: relative; border: 1px dashed var(--border); border-radius: 12px; padding: 12px; text-align: center; background: #0f1117; min-height: 380px; }}
-            .card .preview img {{ max-width: 100%; border-radius: 10px; box-shadow: 0 20px 50px rgba(0,0,0,0.45); }}
-            .thumbs {{ display: flex; flex-direction: column; gap: 10px; }}
-            .thumbs img {{ width: 100%; border-radius: 10px; border: 1px solid var(--border); background: #0f1117; padding: 6px; }}
-            .q-section {{ margin-bottom: 12px; }}
-            .q-section h4 {{ margin: 0 0 6px; color: #ffd6e6; }}
-            .q-section ul {{ margin: 0; padding-left: 18px; color: var(--muted); line-height: 1.5; }}
-        </style>
-    </head>
-    <body>
-        <header>
-            <div>
-                <h1>GlamUp Stylist</h1>
-                <span>Curated looks, questionnaire-driven insights, and outfit cards.</span>
-            </div>
-        </header>
-        <main>
-            <section class='panel chat-window'>
-                <div>
-                    <h3>Chat with your stylist</h3>
-                    <div class='inputs'>
-                        <div>
-                            <label for='message'>Message</label>
-                            <input type='text' id='message' placeholder='Tell us what you need...' />
-                        </div>
-                        <div>
-                            <label for='image'>Upload base/model image</label>
-                            <input type='file' id='image' accept='image/*' />
-                        </div>
-                        <div>
-                            <label for='items'>Product thumbnails (for card)</label>
-                            <input type='file' id='items' accept='image/*' multiple />
-                        </div>
-                        <div>
-                            <label for='generate'>Prompt to generate a new look</label>
-                            <input type='text' id='generate' placeholder='e.g., neon athleisure with metallic accents' />
-                        </div>
-                    </div>
-                </div>
-                <div id='messages'></div>
-                <div style='display:flex; gap: 10px; justify-content:flex-end;'>
-                    <button onclick='sendMessage()'>Send to stylist</button>
-                    <button onclick='clearChat()' style='background:#1f2433; color: var(--text); box-shadow:none;'>Clear</button>
-                </div>
-            </section>
-            <section class='panel'>
-                <h3>Outfit card preview</h3>
-                <div class='card'>
-                    <div class='thumbs' id='thumbs'></div>
-                    <div class='preview'>
-                        <img id='outfit-preview' alt='Outfit preview' />
-                        <p id='preview-caption' style='color: var(--muted); margin-top: 10px;'>Generated or uploaded looks will appear here.</p>
-                    </div>
-                </div>
-                <div style='margin-top:16px;'>
-                    <h3>Style Identity Questionnaire</h3>
-                    {questionnaire_html}
-                </div>
-            </section>
-        </main>
+def crop_products_from_collage(
+    collage_path: Path, crop_boxes: Sequence[Tuple[int, int, int, int]], temp_dir: Path
+) -> List[Path]:
+    """Crop product photos from a collage image into temporary files."""
+    collage = Image.open(collage_path).convert("RGB")
+    results: List[Path] = []
+    for idx, box in enumerate(crop_boxes):
+        crop = collage.crop(box)
+        out_path = temp_dir / f"product_{idx}.png"
+        crop.save(out_path)
+        results.append(out_path)
+        LOGGER.info("Saved cropped product %s to %s", idx, out_path)
+    return results
 
-        <script>
-            const messagesDiv = document.getElementById('messages');
-            const preview = document.getElementById('outfit-preview');
-            const caption = document.getElementById('preview-caption');
-            const thumbs = document.getElementById('thumbs');
 
-            function appendMessage(sender, text) {{
-                const container = document.createElement('div');
-                container.className = 'message';
-                const label = document.createElement('span');
-                label.textContent = sender;
-                const bubble = document.createElement('div');
-                bubble.className = 'bubble ' + (sender === 'You' ? 'you' : 'bot');
-                bubble.textContent = text;
-                container.appendChild(label);
-                container.appendChild(bubble);
-                messagesDiv.appendChild(container);
-                messagesDiv.scrollTop = messagesDiv.scrollHeight;
-            }}
+def gather_product_images(
+    product_images: Optional[Sequence[str]],
+    collage_path: Optional[str],
+    crop_boxes: Optional[Sequence[str]],
+    temp_dir: Path,
+) -> List[Path]:
+    """Unify direct item paths and collage crops into a single product list."""
+    product_paths: List[Path] = []
 
-            function clearChat() {{
-                messagesDiv.innerHTML = '';
-                preview.src = '';
-                caption.textContent = 'Generated or uploaded looks will appear here.';
-                thumbs.innerHTML = '';
-            }}
+    for path in product_images or []:
+        as_path = Path(path)
+        if not as_path.exists():
+            raise FileNotFoundError(f"Product image not found: {as_path}")
+        product_paths.append(as_path)
 
-            function handleThumbs(files) {{
-                thumbs.innerHTML = '';
-                Array.from(files).slice(0, 6).forEach((file) => {{
-                    const reader = new FileReader();
-                    reader.onload = (e) => {{
-                        const img = document.createElement('img');
-                        img.src = e.target.result;
-                        img.alt = file.name;
-                        thumbs.appendChild(img);
-                    }};
-                    reader.readAsDataURL(file);
-                }});
-            }}
+    if collage_path:
+        collage_file = Path(collage_path)
+        if not collage_file.exists():
+            raise FileNotFoundError(f"Collage image not found: {collage_file}")
+        if not crop_boxes:
+            raise ValueError("--collage requires --crop-boxes to know where to crop items")
+        parsed_boxes = parse_crop_boxes(crop_boxes)
+        product_paths.extend(crop_products_from_collage(collage_file, parsed_boxes, temp_dir))
 
-            async function sendMessage() {{
-                const messageInput = document.getElementById('message');
-                const imageInput = document.getElementById('image');
-                const generateInput = document.getElementById('generate');
-                const itemInput = document.getElementById('items');
+    if not product_paths:
+        raise ValueError("No product images provided. Use --items or --collage with --crop-boxes.")
 
-                const message = messageInput.value.trim();
-                const generateText = generateInput.value.trim();
-                const formData = new FormData();
+    return product_paths
 
-                if (message) {{
-                    formData.append('message', message);
-                    appendMessage('You', message);
-                }}
 
-                if (imageInput.files.length > 0) {{
-                    formData.append('image', imageInput.files[0]);
-                    const reader = new FileReader();
-                    reader.onload = (e) => {{ preview.src = e.target.result; caption.textContent = 'Base/model image loaded.'; }};
-                    reader.readAsDataURL(imageInput.files[0]);
-                }}
+def load_pipeline(device: str, dtype: torch.dtype, offload_cpu: bool) -> AutoPipelineForInpainting:
+    """Load the SDXL inpainting pipeline with the IP-Adapter attached."""
+    LOGGER.info("Loading VAE and inpainting pipeline to %s", device)
+    vae = AutoencoderKL.from_pretrained(
+        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype
+    )
+    pipe = AutoPipelineForInpainting.from_pretrained(
+        "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
+        vae=vae,
+        torch_dtype=dtype,
+        use_safetensors=True,
+    )
+    pipe.load_ip_adapter(
+        "h94/IP-Adapter",
+        subfolder="sdxl_models",
+        weight_name="ip-adapter_sdxl.bin",
+        low_cpu_mem_usage=True,
+    )
+    if device == "cuda":
+        pipe = pipe.to(device)
+    elif offload_cpu:
+        pipe.enable_model_cpu_offload()
+    return pipe
 
-                if (generateText) {{
-                    formData.append('generate_prompt', generateText);
-                    appendMessage('You', '[generate image] ' + generateText);
-                }}
 
-                if (itemInput.files.length > 0) {{
-                    handleThumbs(itemInput.files);
-                }}
+def choose_device(force_cpu: bool) -> tuple[str, torch.dtype, bool]:
+    """Pick the execution device and dtype."""
+    if torch.cuda.is_available() and not force_cpu:
+        return "cuda", torch.float16, False
+    LOGGER.warning("CUDA unavailable. Falling back to CPU; generation will be slower.")
+    return "cpu", torch.float32, True
 
-                try {{
-                    const response = await fetch('/chat', {{ method: 'POST', body: formData }});
-                    const data = await response.json();
-                    if (data.message_response) {{ appendMessage('Stylist', data.message_response); }}
-                    if (data.image_description) {{ appendMessage('Stylist', '[Image description] ' + data.image_description); }}
-                    if (data.generated_image_url) {{
-                        preview.src = data.generated_image_url;
-                        caption.textContent = 'Latest generated look';
-                    }}
-                }} catch (err) {{
-                    appendMessage('Stylist', 'Error: ' + err);
-                }} finally {{
-                    messageInput.value = '';
-                    generateInput.value = '';
-                    imageInput.value = '';
-                }}
-            }}
-        </script>
-    </body>
-    </html>
+
+def load_image(path: Path) -> Image.Image:
+    if not path.exists():
+        raise FileNotFoundError(f"Image not found: {path}")
+    return Image.open(path).convert("RGB")
+
+
+def generate_mask(
+    base_image: Image.Image,
+    provided_mask: Optional[Path] = None,
+    preferred_size: Optional[Tuple[int, int]] = None,
+) -> Image.Image:
+    """Generate an inpainting mask.
+
+    Priority:
+    1) user-supplied mask path
+    2) automatic segmentation via rembg (if installed)
+    3) default full-image mask
     """
-    return render_template_string(html_template)
+    target_size = preferred_size or base_image.size
+    if provided_mask:
+        mask = Image.open(provided_mask).convert("L").resize(target_size)
+        return mask
+
+    if rembg_remove is not None:
+        LOGGER.info("Generating mask with rembg")
+        cutout = rembg_remove(base_image)
+        if cutout.mode != "RGBA":
+            cutout = cutout.convert("RGBA")
+        mask = cutout.getchannel("A")
+        mask = ImageOps.invert(mask)
+        return mask
+
+    LOGGER.warning("rembg not installed; using full-image mask.")
+    return Image.new("L", target_size, color=255)
 
 
-@app.route("/chat", methods=["POST"])
-def chat() -> tuple[Any, int]:
-    response: dict[str, str] = {}
-
-    if "image" in request.files:
-        file = request.files["image"]
-        if file and file.filename:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=Path(file.filename).suffix) as tmp:
-                file.save(tmp.name)
-                try:
-                    description = stylist.add_outfit_image(tmp.name)
-                    response["image_description"] = description
-                finally:
-                    os.unlink(tmp.name)
-
-    message = request.form.get("message", "").strip()
-    if message:
-        try:
-            response["message_response"] = stylist.chat(message)
-        except Exception as exc:  # pragma: no cover - defensive
-            response["message_response"] = f"Error: {exc}"
-
-    generate_prompt = request.form.get("generate_prompt", "").strip()
-    if generate_prompt:
-        try:
-            url = stylist.generate_image(generate_prompt)
-            response["generated_image_url"] = url
-        except Exception as exc:  # pragma: no cover - defensive
-            response["generated_image_url"] = ""
-            current = response.get("message_response", "")
-            response["message_response"] = (current + f"\nImage generation error: {exc}").strip()
-
-    return jsonify(response), 200
+def apply_item_to_model(
+    pipe: AutoPipelineForInpainting,
+    model_image: Image.Image,
+    mask_image: Image.Image,
+    item_image: Image.Image,
+    num_inference_steps: int,
+) -> Image.Image:
+    """Run the inpainting pipeline to transfer a garment onto the model."""
+    result = pipe(
+        prompt="",  # no text prompt needed thanks to IP-Adapter guidance
+        image=model_image,
+        mask_image=mask_image,
+        ip_adapter_image=item_image,
+        num_inference_steps=num_inference_steps,
+    ).images[0]
+    return result
 
 
-if __name__ == "__main__":  # pragma: no cover - manual launch
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5001)), debug=True)
+def build_outfit_card(
+    composed_image: Image.Image,
+    item_images: Sequence[Image.Image],
+    output_path: Path,
+    title: str = "Outfit Card",
+) -> None:
+    """Assemble the final outfit card with thumbnails on the side."""
+    padding = 32
+    thumb_size = (160, 160)
+    column_width = thumb_size[0] + padding * 2
+
+    card_width = composed_image.width + column_width + padding
+    card_height = max(
+        composed_image.height + padding * 2,
+        (thumb_size[1] + padding) * len(item_images) + padding,
+    )
+
+    canvas = Image.new("RGB", (card_width, card_height), color=(247, 246, 244))
+    draw = ImageDraw.Draw(canvas)
+
+    title_pos = (padding, padding // 2)
+    draw.text(title_pos, title, fill=(33, 33, 33))
+
+    composed_top = (card_height - composed_image.height) // 2
+    canvas.paste(composed_image, (column_width, composed_top))
+
+    y = padding
+    for idx, img in enumerate(item_images):
+        thumb = ImageOps.fit(img, thumb_size)
+        frame = Image.new("RGB", (thumb_size[0], thumb_size[1]), color=(255, 255, 255))
+        frame.paste(thumb, (0, 0))
+        canvas.paste(frame, (padding, y))
+        draw.text((padding, y + thumb_size[1] + 8), f"Item {idx + 1}", fill=(80, 80, 80))
+        y += thumb_size[1] + padding
+
+    canvas.save(output_path)
+    LOGGER.info("Saved outfit card to %s", output_path)
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    parser = argparse.ArgumentParser(description="Create an outfit card via SDXL inpainting + IP-Adapter")
+    parser.add_argument("--base", dest="base_model_image_path", required=True, help="Path to the base model image")
+    parser.add_argument("--items", nargs="*", dest="product_images", help="Paths to cropped product photos")
+    parser.add_argument("--collage", dest="collage_path", help="Optional collage containing all product items")
+    parser.add_argument(
+        "--crop-boxes",
+        nargs="*",
+        dest="crop_boxes",
+        help="Crop boxes (x1,y1,x2,y2) for extracting products from the collage",
+    )
+    parser.add_argument(
+        "--masks",
+        nargs="*",
+        dest="mask_paths",
+        help="Optional mask images matching the product list order",
+    )
+    parser.add_argument("--output", dest="output_path", required=True, help="Output path for the final outfit card")
+    parser.add_argument("--num-inference-steps", type=int, default=40, help="Diffusion inference steps")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU execution even if CUDA is available")
+    parser.add_argument("--log-level", default="INFO", help="Logging level")
+
+    args = parser.parse_args(argv)
+    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO))
+
+    device, dtype, offload_cpu = choose_device(args.cpu)
+    base_model_image_path = Path(args.base)
+    output_path = Path(args.output)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        temp_dir = Path(tmpdir)
+        product_paths = gather_product_images(
+            product_images=args.product_images,
+            collage_path=args.collage_path,
+            crop_boxes=args.crop_boxes,
+            temp_dir=temp_dir,
+        )
+
+        if args.mask_paths and len(args.mask_paths) not in (1, len(product_paths)):
+            raise ValueError("--masks must be either a single mask or match the number of products")
+        mask_paths = [Path(p) for p in args.mask_paths] if args.mask_paths else []
+
+        base_image = load_image(base_model_image_path)
+        pipe = load_pipeline(device, dtype, offload_cpu)
+
+        composed = base_image
+        applied_items: List[Image.Image] = []
+        for idx, item_path in enumerate(product_paths):
+            LOGGER.info("Applying item %s from %s", idx + 1, item_path)
+            item_img = load_image(item_path)
+            applied_items.append(item_img)
+
+            mask_override = None
+            if mask_paths:
+                mask_override = mask_paths[min(idx, len(mask_paths) - 1)]
+            mask = generate_mask(composed, provided_mask=mask_override, preferred_size=composed.size)
+
+            composed = apply_item_to_model(
+                pipe=pipe,
+                model_image=composed,
+                mask_image=mask,
+                item_image=item_img,
+                num_inference_steps=args.num_inference_steps,
+            )
+
+        build_outfit_card(composed, applied_items, output_path)
+
+
+if __name__ == "__main__":  # pragma: no cover - CLI entrypoint
+    main()
