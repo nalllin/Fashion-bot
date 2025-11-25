@@ -1,20 +1,25 @@
 """Outfit generation utilities for GlamUp LLM workflows.
 
 This module bundles the Stable Diffusion XL inpainting + IP-Adapter pipeline,
-collage-driven product retrieval, and card assembly helpers. It exposes a CLI
-compatible entrypoint mirroring the old `outfit_generator.py` script while
-keeping the generator logic centralized.
+collage-driven product retrieval, and card assembly helpers. It also exposes an
+LLM-backed outfit recommender so GlamUp can keep suggestions and image
+generation in one place. The CLI remains compatible with the legacy
+`outfit_generator.py` entrypoint while keeping the generator logic centralized.
 """
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import os
 import tempfile
 from pathlib import Path
-from typing import List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 from diffusers import AutoPipelineForInpainting, AutoencoderKL
+from dotenv import load_dotenv
+from openai import OpenAI
 from PIL import Image, ImageDraw, ImageOps
 
 try:  # Optional, used for automatic mask generation
@@ -22,7 +27,121 @@ try:  # Optional, used for automatic mask generation
 except Exception:  # pragma: no cover - optional dependency
     rembg_remove = None
 
+load_dotenv()
+
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+
+client = OpenAI()
+
+SYSTEM_PROMPT = """
+You are GlamUp, an AI fashion stylist.
+
+Your job:
+- Take a structured user profile and generate complete outfit ideas.
+- Focus on modern, wearable, India-friendly casual looks.
+- Respect the user's preferred styles, occasion and color palette.
+- Use neutral, earthy palettes when requested (beige, tan, brown, olive, cream, white, black, muted tones).
+
+You MUST return a JSON object with this structure:
+
+{
+  "outfits": [
+    {
+      "id": "outfit_1",
+      "vibe": "short human-readable description",
+      "items": {
+        "top": {
+          "name": "...",
+          "color": "...",
+          "style_tags": ["minimal", "elegant"],
+          "notes": "any styling notes"
+        },
+        "bottom": {
+          "name": "...",
+          "color": "...",
+          "style_tags": ["..."],
+          "notes": "..."
+        },
+        "dress": null OR same structure as top,
+        "shoes": {
+          "name": "...",
+          "color": "...",
+          "style_tags": ["..."],
+          "notes": "..."
+        },
+        "bag": {
+          "name": "...",
+          "color": "...",
+          "style_tags": ["..."],
+          "notes": "..."
+        },
+        "accessories": [
+          {
+            "name": "...",
+            "color": "...",
+            "style_tags": ["..."],
+            "notes": "..."
+          }
+        ]
+      }
+    }
+  ]
+}
+
+Rules:
+- Each outfit either uses (top + bottom) OR a single dress, not both.
+- Always include shoes.
+- Try to include at least one accessory (earrings, bracelet, watch, ring, necklace).
+- Make everything coherent with the user's profile.
+- Keep names realistic, like product titles on a fashion site.
+- Keep notes short and practical.
+Return ONLY valid JSON, no extra text.
+"""
+
 LOGGER = logging.getLogger(__name__)
+
+if not HF_API_TOKEN:
+    LOGGER.warning("HF_API_TOKEN not set; using anonymous hub access may be rate-limited.")
+
+
+def generate_outfits_from_profile(
+    profile: Dict[str, Any],
+    num_outfits: int = 3,
+    model: str = "gpt-4o-mini",
+) -> List[Dict[str, Any]]:
+    """Call the LLM to produce structured outfit suggestions.
+
+    Args:
+        profile: Structured user profile with preferences (styles, palette, occasion, etc.).
+        num_outfits: Desired number of outfits to return.
+        model: OpenAI chat model name.
+
+    Returns:
+        A list of outfit dictionaries.
+    """
+
+    user_payload = {
+        "profile": profile,
+        "num_outfits": num_outfits,
+    }
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": json.dumps(user_payload)},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.9,
+    )
+
+    content = response.choices[0].message.content
+    data = json.loads(content)
+
+    outfits = data.get("outfits", [])
+    if not isinstance(outfits, list):
+        raise ValueError("Model response did not contain 'outfits' list")
+    return outfits
 
 
 def parse_crop_boxes(raw_boxes: Optional[Sequence[str]]) -> List[Tuple[int, int, int, int]]:
@@ -89,19 +208,21 @@ def load_pipeline(device: str, dtype: torch.dtype, offload_cpu: bool) -> AutoPip
     """Load the SDXL inpainting pipeline with the IP-Adapter attached."""
     LOGGER.info("Loading VAE and inpainting pipeline to %s", device)
     vae = AutoencoderKL.from_pretrained(
-        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype
+        "madebyollin/sdxl-vae-fp16-fix", torch_dtype=dtype, token=HF_API_TOKEN
     )
     pipe = AutoPipelineForInpainting.from_pretrained(
         "diffusers/stable-diffusion-xl-1.0-inpainting-0.1",
         vae=vae,
         torch_dtype=dtype,
         use_safetensors=True,
+        token=HF_API_TOKEN,
     )
     pipe.load_ip_adapter(
         "h94/IP-Adapter",
         subfolder="sdxl_models",
         weight_name="ip-adapter_sdxl.bin",
         low_cpu_mem_usage=True,
+        token=HF_API_TOKEN,
     )
     if device == "cuda":
         pipe = pipe.to(device)
